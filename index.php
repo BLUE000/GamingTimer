@@ -487,6 +487,11 @@ if (is_dir($fonts_dir)) {
                 <label>Clock Text Color</label>
                 <input type="color" class="color-picker" id="configColorText" value="#f8fafc" oninput="applyVisualSettings()">
             </div>
+
+            <div class="setting-item" id="settingRolcOffset" style="display: none; flex-direction: column; align-items: flex-start; gap: 5px;">
+                <label>ROLC Time Offset (min) <span id="rolcOffsetVal" style="color:var(--text-muted); font-family:monospace; margin-left:10px;">0</span><br><small style="color:var(--text-muted); font-size:0.75rem;">Sync game time shift (-120 to +120)</small></label>
+                <input type="range" class="range-slider" id="configRolcOffset" min="-120" max="120" step="1" value="0" style="width: 100%;" oninput="applyVisualSettings()">
+            </div>
             
             <div class="setting-item">
                 <label>Background Color</label>
@@ -596,11 +601,12 @@ if (is_dir($fonts_dir)) {
             const urlSize = params.get('size');
             const urlColorText = params.get('colorText');
             const urlColorBg = params.get('colorBg');
+            const urlRolcOffset = params.get('rolcOffset');
             
             let autoStartMatched = false;
 
             // Apply Visual Settings (URL params take priority over Cookies)
-            loadVisualSettings(urlFont, urlCustomFont, urlSize, urlColorText, urlColorBg);
+            loadVisualSettings(urlFont, urlCustomFont, urlSize, urlColorText, urlColorBg, urlRolcOffset);
 
             if (gameQuery) {
                 // Try to find exact key first, then substring match on name
@@ -651,6 +657,11 @@ if (is_dir($fonts_dir)) {
             } else {
                 manualTimeGroup.style.display = 'none';
             }
+            
+            const rolcOffsetDiv = document.getElementById('settingRolcOffset');
+            if (rolcOffsetDiv) {
+                rolcOffsetDiv.style.display = (tpl.mode === 'rolc') ? 'flex' : 'none';
+            }
         }
 
         function startClock() {
@@ -688,6 +699,11 @@ if (is_dir($fonts_dir)) {
             // For session mode, we copy the original start time used to bootstrap
             if (GAME_TEMPLATES[currentTemplateKey].mode === 'session') {
                  params.set('time', gameTimeInput.value);
+            }
+            
+            if (GAME_TEMPLATES[currentTemplateKey].mode === 'rolc') {
+                const rolcEl = document.getElementById('configRolcOffset');
+                if (rolcEl) params.set('rolcOffset', rolcEl.value);
             }
 
             // Add UI settings
@@ -762,6 +778,15 @@ if (is_dir($fonts_dir)) {
             const sizeStr = size + 'rem';
             const color = document.getElementById('configColorText').value;
             const bg = document.getElementById('configColorBg').value;
+            
+            const rolcEl = document.getElementById('configRolcOffset');
+            let rolcOffsetValue = 0;
+            if (rolcEl) {
+                rolcOffsetValue = rolcEl.value;
+                if (document.getElementById('rolcOffsetVal')) {
+                    document.getElementById('rolcOffsetVal').innerText = rolcOffsetValue;
+                }
+            }
 
             // Apply to CSS Variables
             rootStyles.setProperty('--clock-font', font);
@@ -775,15 +800,24 @@ if (is_dir($fonts_dir)) {
             setCookie('gt_font_size', size);
             setCookie('gt_color', color);
             setCookie('gt_bg', bg);
+            setCookie('gt_rolc_offset', rolcOffsetValue);
         }
 
-        function loadVisualSettings(urlFont, urlCustomFont, urlSize, urlColorText, urlColorBg) {
+        function loadVisualSettings(urlFont, urlCustomFont, urlSize, urlColorText, urlColorBg, urlRolcOffset) {
             // Priority: URL Param > Cookie > Default
             const savedFontSelect = urlFont || getCookie('gt_font_select');
             const savedFontCustom = urlCustomFont || getCookie('gt_font_custom');
             const savedSize = urlSize || getCookie('gt_font_size');
             const savedColor = urlColorText || getCookie('gt_color');
             const savedBg = urlColorBg || getCookie('gt_bg');
+            const savedRolcOffset = urlRolcOffset || getCookie('gt_rolc_offset');
+            
+            if (savedRolcOffset !== null && document.getElementById('configRolcOffset')) {
+                document.getElementById('configRolcOffset').value = parseInt(savedRolcOffset) || 0;
+                if (document.getElementById('rolcOffsetVal')) {
+                    document.getElementById('rolcOffsetVal').innerText = document.getElementById('configRolcOffset').value;
+                }
+            }
 
             if (savedFontSelect) {
                 const selectEl = document.getElementById('configFont');
@@ -845,22 +879,71 @@ if (is_dir($fonts_dir)) {
                 return (d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds()) * 1000 + d.getMilliseconds();
 
             } else if (tpl.mode === 'rolc') {
-                // ROLC 120-minute cycle mapping:
-                // TimeZone = ( real_hours * 60 ) + ( real_minutes + 120 )
-                // TimeZone = fmod( TimeZone, 120 )
-                // This means every 120 real minutes = 24 game hours.
+                // ROLC 210-minute cycle mapping (3.5 real hours):
+                // Cycle: 朝(Morning) 35min → 昼(Day) 70min → 夕(Evening) 35min → 夜(Night) 70min (repeat)
+                // Reset (start of Morning) is at 05:15 AM (315 mins since midnight).
+                //   This is derived from: real 07:00 = start of Evening (offset 105 mins into cycle)
+                //   => Reset = 420 - 105 = 315 mins = 05:15 AM
+                //
+                // Schedule (Cycle 1):
+                //  Morning  : 05:15 ~ 05:50  (game time 04:00~12:00)
+                //  Day      : 05:50 ~ 07:00  (game time 12:00~16:00)
+                //  Evening  : 07:00 ~ 07:35  (game time 16:00~20:00)
+                //  Night    : 07:35 ~ 09:05  (game time 20:00~04:00)
+                //  [Cycle 2 starts at 09:05]
+
                 const d = new Date(now);
-                // Total real minutes today mapping to the 120 min window
-                const realMinutes = (d.getHours() * 60) + d.getMinutes();
-                const timeZoneMin = realMinutes % 120; // 0 to 119 minutes
+                let realTotalMinutes = (d.getHours() * 60) + d.getMinutes();
                 
-                // Map the 120 real minutes onto a 24 * 60 (1440) game minutes scale
-                // 1 real minute = 12 game minutes
-                const gameMinutes = timeZoneMin * 12;
-                // Add seconds proportionally (1 real second = 12 game seconds)
-                const gameSeconds = d.getSeconds() * 12;
+                // Offset calculation (slider)
+                const rolcEl = document.getElementById('configRolcOffset');
+                if (rolcEl) {
+                    let offset = parseInt(rolcEl.value) || 0;
+                    realTotalMinutes -= offset;
+                }
                 
-                return ((gameMinutes * 60) + gameSeconds) * 1000;
+                // Base resets at 05:15 AM (315 minutes from midnight)
+                let minsSinceReset = realTotalMinutes - 315;
+                if (minsSinceReset < 0) minsSinceReset += 1440;
+                
+                // 210 minute cycle
+                const cycleMin = minsSinceReset % 210;
+                const cycleSec = d.getSeconds();
+
+                // Compute exact game time based on phase progression (mapping to 24-hour day)
+                let gameHours = 0;
+                let gameMins = 0;
+
+                if (cycleMin < 35) {
+                    // Morning: 35 real mins sweep 8 game hours (04:00 to 12:00)
+                    // Progression: [0:00 -> 35:00) maps to [4:00 -> 12:00)
+                    let prog = (cycleMin * 60 + cycleSec) / (35 * 60);
+                    let hProg = 4 + (prog * 8);
+                    gameHours = Math.floor(hProg);
+                    gameMins = Math.floor((hProg - gameHours) * 60);
+                } else if (cycleMin < 105) {
+                    // Day: 70 real mins sweep 4 game hours (12:00 to 16:00)
+                    let prog = ((cycleMin - 35) * 60 + cycleSec) / (70 * 60);
+                    let hProg = 12 + (prog * 4);
+                    gameHours = Math.floor(hProg);
+                    gameMins = Math.floor((hProg - gameHours) * 60);
+                } else if (cycleMin < 140) {
+                    // Evening: 35 real mins sweep 4 game hours (16:00 to 20:00)
+                    let prog = ((cycleMin - 105) * 60 + cycleSec) / (35 * 60);
+                    let hProg = 16 + (prog * 4);
+                    gameHours = Math.floor(hProg);
+                    gameMins = Math.floor((hProg - gameHours) * 60);
+                } else {
+                    // Night: 70 real mins sweep 8 game hours (20:00 to 04:00)
+                    let prog = ((cycleMin - 140) * 60 + cycleSec) / (70 * 60);
+                    let hProg = 20 + (prog * 8);
+                    if (hProg >= 24) hProg -= 24;
+                    gameHours = Math.floor(hProg);
+                    gameMins = Math.floor((hProg - gameHours) * 60);
+                }
+
+                // Convert to milliseconds 
+                return ((gameHours * 60) + gameMins) * 60 * 1000 + (cycleSec * 1000);
 
             } else if (tpl.mode === 'persistent') {
                 // e.g. 70 real minutes = 1 game day (24 hours)
