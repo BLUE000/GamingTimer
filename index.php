@@ -36,11 +36,12 @@ if (file_exists($csv_path)) {
                 // ROLC Special Case: 120 real minutes = 24 game hours
                 if (strpos(strtoupper($title), 'ROLC') !== false || strpos($title, '120分周期') !== false) {
                     $mode = 'rolc';
+                    // ROLCフェーズ: start はサイクル経過分数（0〜210）
                     $phases = [
-                        [ 'start' => 0, 'name' => 'NIGHT', 'icon' => '🌙', 'color' => '#3b82f6' ],
-                        [ 'start' => 4, 'name' => 'MORNING', 'icon' => '🌅', 'color' => '#fba744' ],
-                        [ 'start' => 12, 'name' => 'EVENING', 'icon' => '🌇', 'color' => '#f97316' ],
-                        [ 'start' => 16, 'name' => 'NIGHT', 'icon' => '🌙', 'color' => '#3b82f6' ]
+                        [ 'start' => 0,   'name' => 'MORNING', 'icon' => '🌅', 'color' => '#fba744' ],
+                        [ 'start' => 35,  'name' => 'DAY',     'icon' => '☀️', 'color' => '#f59e0b' ],
+                        [ 'start' => 105, 'name' => 'EVENING', 'icon' => '🌇', 'color' => '#f97316' ],
+                        [ 'start' => 140, 'name' => 'NIGHT',   'icon' => '🌙', 'color' => '#3b82f6' ],
                     ];
                 } else {
                     $phases = [
@@ -879,62 +880,50 @@ if (is_dir($fonts_dir)) {
                 return (d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds()) * 1000 + d.getMilliseconds();
 
             } else if (tpl.mode === 'rolc') {
-                // ROLC 210-minute cycle mapping (3.5 real hours):
-                // Cycle: 朝(Morning) 35min → 昼(Day) 70min → 夕(Evening) 35min → 夜(Night) 70min (repeat)
-                // Reset (start of Morning) is at 05:15 AM (315 mins since midnight).
-                //   This is derived from: real 07:00 = start of Evening (offset 105 mins into cycle)
-                //   => Reset = 420 - 105 = 315 mins = 05:15 AM
-                //
-                // Schedule (Cycle 1):
-                //  Morning  : 05:15 ~ 05:50  (game time 04:00~12:00)
-                //  Day      : 05:50 ~ 07:00  (game time 12:00~16:00)
-                //  Evening  : 07:00 ~ 07:35  (game time 16:00~20:00)
-                //  Night    : 07:35 ~ 09:05  (game time 20:00~04:00)
-                //  [Cycle 2 starts at 09:05]
-
+                // ROLC 210-minute cycle: 朝35min→昼70min→夕35min→夜70min
+                // Base: 正午12:00に「朝」開始（実測確認済: 12:00に夜→朝切替）
                 const d = new Date(now);
-                let realTotalMinutes = (d.getHours() * 60) + d.getMinutes();
-                
+                let baseTime = new Date(now);
+                baseTime.setHours(12, 0, 0, 0);
+                if (d < baseTime) baseTime.setDate(baseTime.getDate() - 1);
+
+                // 整数分のみ（cycleSec との二重カウントを防ぐ）
+                let cycleMin = Math.floor((now - baseTime) / 60000);
+                const cycleSec = d.getSeconds();
+
                 // Offset calculation (slider)
                 const rolcEl = document.getElementById('configRolcOffset');
                 if (rolcEl) {
-                    let offset = parseInt(rolcEl.value) || 0;
-                    realTotalMinutes -= offset;
+                    cycleMin -= parseInt(rolcEl.value) || 0;
                 }
-                
-                // Base resets at 05:15 AM (315 minutes from midnight)
-                let minsSinceReset = realTotalMinutes - 315;
-                if (minsSinceReset < 0) minsSinceReset += 1440;
-                
-                // 210 minute cycle
-                const cycleMin = minsSinceReset % 210;
-                const cycleSec = d.getSeconds();
 
-                // Compute exact game time based on phase progression (mapping to 24-hour day)
+                // [0, 210) の範囲に正規化
+                cycleMin = ((cycleMin % 210) + 210) % 210;
+
+                // ゲーム内時刻へマッピング（24時間）
+                // 朝:  0-35min  → game 04:00-12:00 (8h)
+                // 昼: 35-105min → game 12:00-16:00 (4h)
+                // 夕: 105-140min → game 16:00-20:00 (4h)
+                // 夜: 140-210min → game 20:00-04:00 (8h, 翌日ラップ)
                 let gameHours = 0;
                 let gameMins = 0;
 
                 if (cycleMin < 35) {
-                    // Morning: 35 real mins sweep 8 game hours (04:00 to 12:00)
-                    // Progression: [0:00 -> 35:00) maps to [4:00 -> 12:00)
                     let prog = (cycleMin * 60 + cycleSec) / (35 * 60);
                     let hProg = 4 + (prog * 8);
                     gameHours = Math.floor(hProg);
                     gameMins = Math.floor((hProg - gameHours) * 60);
                 } else if (cycleMin < 105) {
-                    // Day: 70 real mins sweep 4 game hours (12:00 to 16:00)
                     let prog = ((cycleMin - 35) * 60 + cycleSec) / (70 * 60);
                     let hProg = 12 + (prog * 4);
                     gameHours = Math.floor(hProg);
                     gameMins = Math.floor((hProg - gameHours) * 60);
                 } else if (cycleMin < 140) {
-                    // Evening: 35 real mins sweep 4 game hours (16:00 to 20:00)
                     let prog = ((cycleMin - 105) * 60 + cycleSec) / (35 * 60);
                     let hProg = 16 + (prog * 4);
                     gameHours = Math.floor(hProg);
                     gameMins = Math.floor((hProg - gameHours) * 60);
                 } else {
-                    // Night: 70 real mins sweep 8 game hours (20:00 to 04:00)
                     let prog = ((cycleMin - 140) * 60 + cycleSec) / (70 * 60);
                     let hProg = 20 + (prog * 8);
                     if (hProg >= 24) hProg -= 24;
@@ -942,7 +931,6 @@ if (is_dir($fonts_dir)) {
                     gameMins = Math.floor((hProg - gameHours) * 60);
                 }
 
-                // Convert to milliseconds 
                 return ((gameHours * 60) + gameMins) * 60 * 1000 + (cycleSec * 1000);
 
             } else if (tpl.mode === 'persistent') {
@@ -972,12 +960,30 @@ if (is_dir($fonts_dir)) {
             clockEl.innerHTML = `${hStr}<span class="colon">:</span>${mStr}<span class="colon">:</span>${sStr}`;
 
             // Phase Logic
-            let gameHourFloat = h + (m / 60) + (s / 3600);
-            let activePhase = tpl.phases[tpl.phases.length - 1]; // fallback to last
-            
-            for (let i = 0; i < tpl.phases.length; i++) {
-                if (gameHourFloat >= tpl.phases[i].start) {
-                    activePhase = tpl.phases[i];
+            let activePhase = tpl.phases[tpl.phases.length - 1]; // fallback
+
+            if (tpl.mode === 'rolc') {
+                // ROLCはサイクル経過分数でフェーズを直接判定（ゲーム時刻は使わない）
+                const dNow = new Date();
+                let bTime = new Date(dNow);
+                bTime.setHours(12, 0, 0, 0);
+                if (dNow < bTime) bTime.setDate(bTime.getDate() - 1);
+                let cMin = Math.floor((dNow - bTime) / 60000);
+                const rolcElP = document.getElementById('configRolcOffset');
+                if (rolcElP) cMin -= parseInt(rolcElP.value) || 0;
+                const cycPos = ((cMin % 210) + 210) % 210;
+                for (let i = tpl.phases.length - 1; i >= 0; i--) {
+                    if (cycPos >= tpl.phases[i].start) {
+                        activePhase = tpl.phases[i];
+                        break;
+                    }
+                }
+            } else {
+                let gameHourFloat = h + (m / 60) + (s / 3600);
+                for (let i = 0; i < tpl.phases.length; i++) {
+                    if (gameHourFloat >= tpl.phases[i].start) {
+                        activePhase = tpl.phases[i];
+                    }
                 }
             }
 
